@@ -1,15 +1,16 @@
 import cv2
 
 def pick_coords(str):
-    img = cv2.imread(str)
 
-    if img is None:
-        raise "IMG is NONE"
+    # rois = cv2.selectROIs("Zaznacz obszar", str, showCrosshair=True)
+    x, y, w, h = cv2.selectROI("Zaznacz obszar", str, showCrosshair=True)
+    cv2.destroyAllWindows()
+    print(f"x: {x}, y: {y}, w: {w}, h: {h}")
 
-    x, y, w, h = cv2.selectROI("Zaznacz obszar", img, showCrosshair=True)
+    roi = str[y:y+h, x:x+w]
+    cv2.imwrite("gold.png", roi)
 
-    print(f"x={x}, y={y}, szerokosc={w}, wysokosc={h}")
-    print(f"lewy gorny: ({x}, {y}), prawy dolny: ({x + w}, {y + h})")
-
-    wycinek = img[y:y+h, x:x+w]
-    return wycinek
+    # for i, (x, y, w, h) in enumerate(rois, start=1):
+    #     print(f"Obszar {i}: x={x}, y={y}, w={w}, h={h}")
+        
+    
