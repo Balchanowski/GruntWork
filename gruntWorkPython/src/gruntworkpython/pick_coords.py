@@ -8,7 +8,7 @@ def pick_coords(str):
     print(f"x: {x}, y: {y}, w: {w}, h: {h}")
 
     roi = str[y:y+h, x:x+w]
-    cv2.imwrite("gold.png", roi)
+    cv2.imwrite("hunger.png", roi)
 
     # for i, (x, y, w, h) in enumerate(rois, start=1):
     #     print(f"Obszar {i}: x={x}, y={y}, w={w}, h={h}")
