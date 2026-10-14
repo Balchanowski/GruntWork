@@ -1,93 +1,187 @@
 import cv2
-from pathlib import Path
-from .pick_coords import pick_coords
-import os
+import easyocr
 import numpy as np
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
+RESOURCES_DIR = DATA_DIR / "resources"
 
-def getResourseFromImage(imagePath: str):
-    print(imagePath)
-    
-    img = cv2.imread(imagePath)
-    # print(img.shape)
+REF_H = 1367        # wysokość screena, z którego wycięte są wzorce
+BAR_HEIGHT = 0.05   # pasek surowców leży w górnych 5% ekranu
+MIN_SCORE = 0.5    # poniżej tego uznajemy, że ikonki nie znaleziono dla złota
+NAMES = ["gold", "lumber", "oil", "hunger"]
+OCR_HEIGHT = 64
 
-    if img is None:
-        raise FileNotFoundError(imagePath)
-    
-    h, w, _ = img.shape
-    from_x = int(0.40 * w)
-    to_x = int(0.75 * w)
-    from_h = 0
-    to_h = int(0.04 * h)
-    roi = img[from_h: to_h, from_x:to_x]
-    print(from_x, to_x, from_h, to_h)
 
-    
-    # resized = cv2.resize(roi, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
-    # pick_coords(roi)
-    
-    resources = os.listdir(str(DATA_DIR / "resources"))
-    print(resources)
+# ---------- wzorce ----------
 
-    rectangles = []
-    podglad = img.copy()
+def load_templates() -> dict[str, np.ndarray]:
+    """Wczytuje wzorce raz i od razu zamienia je na szare."""
+    templates = {}
+    for name in NAMES:
+        path = RESOURCES_DIR / f"{name}.png"
+        im = cv2.imread(str(path))
+        if im is None:
+            raise FileNotFoundError(path)
+        templates[name] = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    return templates
 
-    for resource in resources:
-        resource_path = str(DATA_DIR / "resources" / resource)
-        print(resource_path)
-        resource_im = cv2.imread(resource_path)
 
-        if resource_im is None:
-            raise FileNotFoundError(resource_path)
-        
-        
+# ---------- szukanie ikonek ----------
 
-        resource_array = cv2.matchTemplate(img, resource_im, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(resource_array)
-        print(max_val, max_loc)
+def find_icon(gray: np.ndarray, template: np.ndarray, scales):
+    """Szuka wzorca w różnych skalach. Zwraca (score, x, y, w, h, scale) albo None."""
+    best = None
+    h_img, w_img = gray.shape[:2]
 
-        h_gold, w_gold, _ = resource_im.shape
-        print(w_gold, h_gold)
-        x, y = max_loc
+    for scale in scales:
+        scaled = cv2.resize(template, None, fx=scale, fy=scale)
+        h, w = scaled.shape[:2]
+        if h > h_img or w > w_img:
+            continue
 
-        rectangles.append(((x,y),(x + w_gold, y + h_gold)))
+        result = cv2.matchTemplate(gray, scaled, cv2.TM_CCOEFF_NORMED)
+        _, score, _, (x, y) = cv2.minMaxLoc(result)
 
-        #laptop podgląd
-        # podglad = cv2.resize(podglad, (1400, 800))
-            
-    sorted_rectangles = sorted(rectangles, key=lambda r: r[0][0])
-    print(sorted_rectangles)
+        if best is None or score > best[0]:
+            best = (score, x, y, w, h, scale)
+    return best
 
-    selectRectanglesForImageOfResources(sorted_rectangles, podglad)
-    value_rectangles = setRectanglesForQuantityOfResources(sorted_rectangles, podglad)
 
-    podglad = cv2.resize(podglad, (1400, 800))
-    cv2.imshow('Wiele prostokatow', podglad)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+def locate(region: np.ndarray, template: np.ndarray, scales, offset_x: int = 0):
+    """find_icon + zamiana wyniku na prostokąt (x1, y1, x2, y2) w układzie pełnego screena."""
+    found = find_icon(region, template, scales)
+    if found is None:
+        return None, 0.0, None
+    score, x, y, w, h, scale = found
+    x += offset_x
+    return (x, y, x + w, y + h), score, scale
 
-def setRectanglesForQuantityOfResources(sorted_rectangles, podglad):
+
+def calibration_failed(name: str, score: float):
+    print(f"Kalibracja nieudana: {name} (score {score:.2f})")
+    return None
+
+
+def find_icons(img: np.ndarray, templates: dict) -> dict | None:
+    """Zwraca {nazwa: (x1, y1, x2, y2)} dla czterech ikonek albo None, jeśli się nie udało."""
+    img_h = img.shape[0]
+    bar = cv2.cvtColor(img[: int(BAR_HEIGHT * img_h), :], cv2.COLOR_BGR2GRAY)
+    icons = {}
+
+    # 1. złoto: skala wyliczona z wysokości ekranu, ±15%
+    expected = img_h / REF_H
+    gold_scales = np.arange(expected * 0.85, expected * 1.15, 0.01)
+    icons["gold"], score, gold_scale = locate(bar, templates["gold"], gold_scales)
+    if score < MIN_SCORE:
+        return calibration_failed("gold", score)
+
+    # 2. ropa i jedzenie: tylko skale blisko skali złota
+    narrow = np.arange(gold_scale - 0.05, gold_scale + 0.051, 0.01)
+    for name in ["oil", "hunger"]:
+        icons[name], score, _ = locate(bar, templates[name], narrow)
+        # if score < MIN_SCORE:
+        #     print(calibration_failed(name, score))
+
+    # 3. drewno: tylko między złotem a ropą
+    gold_right = icons["gold"][2]
+    oil_left = icons["oil"][0]
+    between = bar[:, gold_right:oil_left]
+    icons["lumber"], score, _ = locate(between, templates["lumber"], narrow, offset_x=gold_right)
+    # if score < MIN_SCORE:
+    #     print(calibration_failed("lumber", score))
+
+    order = [icons[n][0] for n in ["gold", "lumber", "oil", "hunger"]]
+    if order != sorted(order):
+        return calibration_failed("kolejność ikonek", 0)
+
+    gold_y = icons["gold"][1]
+    if any(abs(icons[n][1] - gold_y) > 5 for n in NAMES):
+        return calibration_failed("ikonki nie w jednym rzędzie", 0)
+    return icons
+
+
+def quantity_boxes(icons: dict, img_w: int) -> dict:
+    """Obszar liczby: od prawej krawędzi ikonki do lewej krawędzi następnej."""
+    ordered = sorted(icons.items(), key=lambda item: item[1][0])   # od lewej do prawej
+
     gaps = []
-    value_rectangles = []
-    for cur, nxt in zip(sorted_rectangles, sorted_rectangles[1:]):
-        cur_right = cur[1][0]
-        next_left = nxt[0][0]
-        gaps.append(next_left - cur_right)
-
+    for (_, cur), (_, nxt) in zip(ordered, ordered[1:]):
+        gaps.append(nxt[0] - cur[2])
     mean_gap = sum(gaps) // len(gaps)
 
-    for i, ((_, y1), (x2, y2)) in enumerate(sorted_rectangles):
+    boxes = {}
+    for i, (name, (_, y1, x2, y2)) in enumerate(ordered):
         gap = gaps[i] if i < len(gaps) else mean_gap
-        value_rectangles.append((x2, y1, x2 + gap, y2))
-        cv2.rectangle(podglad, (x2, y1), (x2 + gap, y2), (0, 0, 255), 3)
-
-    return value_rectangles
-
-def selectRectanglesForImageOfResources(sorted_rectangles, podglad):
-    for pt1, pt2 in sorted_rectangles:
-        cv2.rectangle(podglad, pt1, pt2, (0, 255, 0), 3)
+        boxes[name] = (x2, y1, min(x2 + gap, img_w), y2)
+    return boxes
 
 
-getResourseFromImage(str(DATA_DIR / "screen1.png"))
+# ---------- OCR ----------
+
+def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
+    values = {}
+    for name, (x1, y1, x2, y2) in boxes.items():
+        crop = img[y1:y2, x1:x2]
+
+        scale = OCR_HEIGHT / crop.shape[0]
+        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        texts = ocr.readtext(crop, detail=0, allowlist="0123456789/")
+        values[name] = "".join(texts)
+    return values
+
+
+# ---------- podgląd ----------
+
+def draw_debug(img: np.ndarray, icons: dict, boxes: dict, path: str):
+    podglad = img.copy()
+    for x1, y1, x2, y2 in icons.values():
+        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 255, 0), 3)
+    for x1, y1, x2, y2 in boxes.values():
+        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    cv2.imwrite(path, podglad)
+
+
+# ---------- całość: kalibracja raz, potem tylko odczyt ----------
+
+class ResourceReader:
+    def __init__(self):
+        self.templates = load_templates()
+        self.ocr = easyocr.Reader(["en"], gpu=True)
+        self.icons = None
+        self.boxes = None
+        self.frame_shape = None
+
+    def calibrate(self, frame: np.ndarray) -> bool:
+        icons = find_icons(frame, self.templates)
+        if icons is None:
+            self.icons = self.boxes = self.frame_shape = None
+            return False
+        self.icons = icons
+        self.boxes = quantity_boxes(icons, frame.shape[1])
+        self.frame_shape = frame.shape
+        return True
+
+    def read(self, frame: np.ndarray) -> dict | None:
+        # kalibrujemy, jeśli jeszcze nie było albo zmienił się rozmiar klatki
+        if self.boxes is None or frame.shape != self.frame_shape:
+            if not self.calibrate(frame):
+                return None
+        return read_values(frame, self.boxes, self.ocr)
+
+
+if __name__ == "__main__":
+    reader = ResourceReader()
+
+    for i in range(1, 6):
+        frame = cv2.imread(str(DATA_DIR / f"screen{i}.png"))
+        if frame is None:
+            raise FileNotFoundError(f"screen{i}.png")
+
+        values = reader.read(frame)
+        print(f"screen{i}: {values}")
+
+        if reader.boxes is not None:
+            draw_debug(frame, reader.icons, reader.boxes, f"podglad{i}.png")
