@@ -67,7 +67,7 @@ def find_resource_bar(img: np.ndarray, templates: dict) -> dict | None:
 
     # 1. złoto: skala wyliczona z wysokości ekranu, ±15%
     expected = img_h / REF_H
-    gold_scales = np.arange(expected * 0.85, expected * 1.15, 0.01)
+    gold_scales = np.arange(expected * 0.5, expected * 1.5, 0.01)
     icons["gold"], score, gold_scale = locate(bar, templates["gold"], gold_scales)
     gold_score = score
 
@@ -132,6 +132,9 @@ def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
     values = {}
     for name, (x1, y1, x2, y2) in boxes.items():
         crop = img[y1:y2, x1:x2]
+        crop = crop.max(axis=2) 
+        if is_gray(img):
+            _, crop = cv2.threshold(crop, 40, 255, cv2.THRESH_BINARY)
 
         scale = OCR_HEIGHT / crop.shape[0]
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
@@ -143,6 +146,9 @@ def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
         values[name] = "".join(texts)
     return values
 
+def is_gray(frame) -> bool:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    return hsv[..., 1].mean() < 10
 
 # ---------- podgląd ----------
 
@@ -160,7 +166,7 @@ def draw_debug(img: np.ndarray, icons: dict, boxes: dict, path: str):
 def debug_find(path, out):
     img = cv2.imread(str(path))
     print(img.shape)
-    templates = load_templates("classic")
+    templates = load_templates("remastered")
     bar = cv2.cvtColor(img[: int(BAR_HEIGHT * img.shape[0]), :], cv2.COLOR_BGR2GRAY)
     podglad = img.copy()
 
@@ -228,6 +234,8 @@ class ResourceReader:
         return True
 
     def read(self, frame: np.ndarray) -> dict | None:
+        if is_gray(frame):
+            return None
         # kalibrujemy, jeśli jeszcze nie było albo zmienił się rozmiar klatki
         if self.boxes is None or frame.shape != self.frame_shape:
             if not self.calibrate(frame):
@@ -236,7 +244,7 @@ class ResourceReader:
 
 
 if __name__ == "__main__":
-    # debug_find(DATA_DIR / "screen6.png", "podglad6.png")
+    # debug_find(DATA_DIR / "screens" / "screen25.png", "podglad6.png")
     reader = ResourceReader()
 
     files = os.listdir(str(DATA_DIR / "screens"))

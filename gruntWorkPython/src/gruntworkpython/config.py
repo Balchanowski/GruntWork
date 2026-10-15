@@ -16,4 +16,9 @@ OCR_HEIGHT = 64
 MINIMAP_REF = (63, 72, 367, 367)
 MINIMAP_MARGIN = 1
 
+MINIMAP_TEMPLATES = {
+    "human": {"offset": (15, 8), "size": 367},
+    "orc": {}
+}
+
 DEBUG = False
