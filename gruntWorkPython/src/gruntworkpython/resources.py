@@ -1,8 +1,8 @@
-from pathlib import Path
 import os
 import cv2
 import easyocr
 import numpy as np
+import re
 from .config import DATA_DIR, REF_H, BAR_HEIGHT, MIN_SCORE, RESOURCE_NAMES, RESOURCES_DIR, DEBUG, OCR_HEIGHT
 
 
@@ -65,7 +65,7 @@ def find_resource_bar(img: np.ndarray, templates: dict) -> dict | None:
     bar = cv2.cvtColor(img[: int(BAR_HEIGHT * img_h), :], cv2.COLOR_BGR2GRAY)
     icons = {}
 
-    # 1. złoto: skala wyliczona z wysokości ekranu, ±15%
+    # 1. złoto: skala wyliczona z wysokości ekranu, ±0.5 - 1.5
     expected = img_h / REF_H
     gold_scales = np.arange(expected * 0.5, expected * 1.5, 0.01)
     icons["gold"], score, gold_scale = locate(bar, templates["gold"], gold_scales)
@@ -98,7 +98,7 @@ def find_resource_bar(img: np.ndarray, templates: dict) -> dict | None:
         return calibration_failed("lumber", 0)
 
     if score < MIN_SCORE:
-        print(calibration_failed("lumber", score))
+        print(f"UWAGA: lumber słabo dopasowany ({score:.2f})")
 
     order = [icons[n][0] for n in ["gold", "lumber", "oil", "hunger"]]
     if order != sorted(order):
@@ -128,13 +128,11 @@ def quantity_boxes(icons: dict, img_w: int) -> dict:
 
 # ---------- OCR ----------
 
-def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
+def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader, debug_prefix: str = "") -> dict:
     values = {}
     for name, (x1, y1, x2, y2) in boxes.items():
         crop = img[y1:y2, x1:x2]
-        crop = crop.max(axis=2) 
-        if is_gray(img):
-            _, crop = cv2.threshold(crop, 40, 255, cv2.THRESH_BINARY)
+        crop = crop.max(axis=2)
 
         scale = OCR_HEIGHT / crop.shape[0]
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
@@ -142,13 +140,44 @@ def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
         pad = OCR_HEIGHT // 4
         crop = cv2.copyMakeBorder(crop, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
 
-        texts = ocr.readtext(crop, detail=0, allowlist="0123456789/")
-        values[name] = "".join(texts)
+        if np.median(crop) > 120:      # jasne tło (np. śnieg)
+            _, crop = cv2.threshold(crop, 200, 255, cv2.THRESH_BINARY)
+
+        _, binary = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text_a, conf_a = ocr_text(ocr, crop)
+        text_b, conf_b = ocr_text(ocr, binary)
+
+        if conf_a >= 0.5 and is_valid(name, text_a):
+            values[name] = text_a
+        else:
+            values[name] = text_b
+
+        if DEBUG:
+            out_dir = DATA_DIR / "debug_crops"
+            out_dir.mkdir(exist_ok=True)
+            cv2.imwrite(str(out_dir / f"{debug_prefix}{name}_plain.png"), crop)
+            cv2.imwrite(str(out_dir / f"{debug_prefix}{name}_otsu.png"), binary)
+            print(name, repr(text_a), round(conf_a, 2), "|", repr(text_b), round(conf_b, 2))
+
     return values
 
-def is_gray(frame) -> bool:
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    return hsv[..., 1].mean() < 10
+def ocr_text(ocr, img):
+    res = ocr.readtext(img, allowlist="0123456789/")
+    if not res:
+        return "", 0.0
+    return "".join(r[1] for r in res), min(r[2] for r in res)
+
+def is_gray(img, icons) -> bool:
+    for x1, y1, x2, y2 in icons.values():
+        crop = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        if crop[..., 1].mean() > 30:
+            return False
+    return True
+
+def is_valid(name: str, text: str) -> bool:
+    if name == "hunger":
+        return re.fullmatch(r"\d+/\d+", text) is not None
+    return re.fullmatch(r"\d+", text) is not None
 
 # ---------- podgląd ----------
 
@@ -234,11 +263,11 @@ class ResourceReader:
         return True
 
     def read(self, frame: np.ndarray) -> dict | None:
-        if is_gray(frame):
-            return None
         # kalibrujemy, jeśli jeszcze nie było albo zmienił się rozmiar klatki
         if self.boxes is None or frame.shape != self.frame_shape:
             if not self.calibrate(frame):
+                return None
+        if is_gray(frame, self.icons):
                 return None
         return read_values(frame, self.boxes, self.ocr)
 
@@ -254,7 +283,6 @@ if __name__ == "__main__":
         frame = cv2.imread(str(DATA_DIR / "screens" / f"screen{i}.png"))
         if frame is None:
             raise FileNotFoundError(f"screen{i}.png")
-
         values = reader.read(frame)
         print(f"screen{i}: {values}")
 
