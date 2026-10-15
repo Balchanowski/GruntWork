@@ -3,25 +3,15 @@ import os
 import cv2
 import easyocr
 import numpy as np
+from .config import DATA_DIR, REF_H, BAR_HEIGHT, MIN_SCORE, RESOURCE_NAMES, RESOURCES_DIR, DEBUG, OCR_HEIGHT
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
-RESOURCES_DIR = DATA_DIR / "resources"
-
-REF_H = 1367        # wysokość screena, z którego wycięte są wzorce
-BAR_HEIGHT = 0.05   # pasek surowców leży w górnych 5% ekranu
-MIN_SCORE = 0.5    # poniżej tego uznajemy, że ikonki nie znaleziono dla złota
-NAMES = ["gold", "lumber", "oil", "hunger"]
-OCR_HEIGHT = 64
-DEBUG = False # tryb debugowania
 
 # ---------- wzorce ----------
 
 def load_templates(version: str) -> dict[str, np.ndarray]:
     """Wczytuje wzorce raz i od razu zamienia je na szare."""
     templates = {}
-    for name in NAMES:
+    for name in RESOURCE_NAMES:
         path = RESOURCES_DIR / version / f"{name}.png"
         im = cv2.imread(str(path))
         if im is None:
@@ -115,7 +105,7 @@ def find_resource_bar(img: np.ndarray, templates: dict) -> dict | None:
         return calibration_failed("kolejność ikonek", 0)
 
     gold_y = icons["gold"][1]
-    if any(abs(icons[n][1] - gold_y) > 5 for n in NAMES):
+    if any(abs(icons[n][1] - gold_y) > 5 for n in RESOURCE_NAMES):
         return calibration_failed("ikonki nie w jednym rzędzie", 0)
     return icons, gold_score
 
@@ -159,9 +149,9 @@ def read_values(img: np.ndarray, boxes: dict, ocr: easyocr.Reader) -> dict:
 def draw_debug(img: np.ndarray, icons: dict, boxes: dict, path: str):
     podglad = img.copy()
     for x1, y1, x2, y2 in icons.values():
-        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 255, 0), 2)
     for x1, y1, x2, y2 in boxes.values():
-        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        cv2.rectangle(podglad, (x1, y1), (x2, y2), (0, 0, 255), 2)
     cv2.imwrite(path, podglad)
 
 
