@@ -1,2 +1,3 @@
-python/venv
-python/grunWorkPython/src/gruntworkpython/__pycache__
+.venv/
+__pycache__/
+*.pyc
